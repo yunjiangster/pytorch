@@ -831,7 +831,7 @@ def check_if_inductor_supported(device: torch.device | str | None = None):
     scheduling_factory(None).check_if_available(device)
 
 
-def is_inductor_supported(device: torch.device | None = None):
+def is_inductor_supported(device: torch.device | str | None = None):
     try:
         check_if_inductor_supported()
         return True
