@@ -825,7 +825,7 @@ def check_if_inductor_supported(device: torch.device | str | None = None):
     elif isinstance(device, str):
         device = torch.device(device)
 
-    scheduling_factory = get_scheduling_for_device(device.type())
+    scheduling_factory = get_scheduling_for_device(device.type)
     if scheduling_factory is None:
         return False
     scheduling_factory(None).check_if_available(device)
