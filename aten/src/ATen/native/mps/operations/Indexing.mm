@@ -42,8 +42,55 @@
 #include <ATen/ops/view_as_real.h>
 #endif
 
+constexpr auto nonZeroMaxSize = 1UL << 24;
+
 namespace at::native {
 namespace mps {
+
+#ifndef PYTORCH_JIT_COMPILE_SHADERS
+static auto& lib = MetalShaderLibrary::getBundledLibrary();
+#else
+#include <ATen/native/mps/Indexing_metallib.h>
+#endif
+
+id<MTLBuffer> generateKernelDataOffsets(id<MTLComputeCommandEncoder> commandEncoder,
+                                        const TensorIteratorBase& iter,
+                                        bool use_64bit_index) {
+  constexpr uint32_t nOffsets = 3;
+  uint32_t numThreads = iter.numel();
+  const uint32_t nDim = iter.ndim();
+  const IntArrayRef& iterShape = iter.shape();
+  std::vector<uint32_t> iterShapeData(iterShape.size());
+  std::vector<std::array<uint32_t, nOffsets>> strides(nDim);
+  TORCH_INTERNAL_ASSERT(iter.ntensors() >= nOffsets);
+  TORCH_CHECK(use_64bit_index || iter.can_use_32bit_indexing(), "Can't be indexed using 32-bit iterator");
+
+  for (const auto i : c10::irange(iterShape.size())) {
+    iterShapeData[i] = static_cast<uint32_t>(iterShape[i]);
+  }
+
+  for (const auto i : c10::irange(nDim)) {
+    for (const auto offset : c10::irange(nOffsets)) {
+      strides[i][offset] = static_cast<uint32_t>(iter.strides(offset)[i]);
+    }
+  }
+
+  auto kernelDataOffsetsPSO =
+      lib.getPipelineStateForFunc(use_64bit_index ? "kernel_index_offsets_64" : "kernel_index_offsets_32");
+  const auto elementSize = use_64bit_index ? sizeof(simd_ulong3) : sizeof(simd_uint3);
+  id<MTLBuffer> kernelDataOffsets = (id<MTLBuffer>)getIMPSAllocator()->allocate(numThreads * elementSize).get();
+
+  [commandEncoder setComputePipelineState:kernelDataOffsetsPSO];
+  [commandEncoder setBytes:strides.data() length:sizeof(uint32_t) * nDim * nOffsets atIndex:0];
+  [commandEncoder setBuffer:kernelDataOffsets offset:0 atIndex:1];
+  [commandEncoder setBytes:iterShapeData.data() length:sizeof(uint32_t) * iterShape.size() atIndex:2];
+  [commandEncoder setBytes:&nDim length:sizeof(uint32_t) atIndex:3];
+
+  mtl_dispatch1DJob(commandEncoder, kernelDataOffsetsPSO, numThreads);
+
+  return kernelDataOffsets;
+}
+
 static std::string getBitSizeString(ScalarType scalar_type) {
   size_t scalarBitSize = c10::elementSize(scalar_type) * 8;
   TORCH_CHECK(scalarBitSize <= 64, "Unsupported data type: ", getMPSTypeString(scalar_type));
@@ -100,7 +147,7 @@ static bool dispatchIndexKernel(TensorIteratorBase& iter,
 
       auto indexFunction = getIndexFunctionName(
           inputTensor.scalar_type(), index_select, accumulate, serial_index_put, use_64bit_indexing);
-      auto indexSelectPSO = MPSDevice::getInstance()->metalIndexingPSO(indexFunction);
+      auto indexSelectPSO = lib.getPipelineStateForFunc(indexFunction);
       size_t argumentBufferLength = sizeof(uint64_t) * num_indices;
       auto indexAB = [[device newBufferWithLength:argumentBufferLength options:0] autorelease];
       uint64_t* indexABContents = (uint64_t*)(indexAB.contents);
@@ -115,13 +162,8 @@ static bool dispatchIndexKernel(TensorIteratorBase& iter,
       getMPSProfiler().beginProfileKernel(indexSelectPSO, indexFunction, {inputTensor});
 
       [computeEncoder setComputePipelineState:indexSelectPSO];
-      [computeEncoder setBuffer:indexAB offset:0 atIndex:0];
-      mtl_setBytes(computeEncoder, index_size, 1);
-      mtl_setBytes(computeEncoder, index_stride, 2);
-      [computeEncoder setBuffer:kernelDataOffsets offset:0 atIndex:3];
-      mtl_setBuffer(computeEncoder, inputTensor, 4);
-      mtl_setBuffer(computeEncoder, outputTensor, 5);
-      mtl_setBytes(computeEncoder, num_indices, 6);
+      mtl_setArgs(
+          computeEncoder, indexAB, index_size, index_stride, kernelDataOffsets, inputTensor, outputTensor, num_indices);
       MTLSize gridSize = MTLSizeMake(numThreads, 1, 1);
       if (serial_index_put) {
         mtl_setBytes(computeEncoder, numIters, 7);
@@ -215,6 +257,52 @@ static Tensor nonzero_fallback(const Tensor& self) {
   return at::nonzero(self.to("cpu")).to("mps");
 }
 
+static Tensor& nonzero_out_native_mps(const Tensor& self, Tensor& out_) {
+  using namespace mps;
+
+  int64_t nDim = self.dim();
+  MPSStream* stream = getCurrentMPSStream();
+  using CachedGraph = MPSUnaryCachedGraph;
+
+  dispatch_sync(stream->queue(), ^() {
+    stream->synchronize(SyncType::COMMIT_AND_WAIT);
+  });
+  int64_t total_nonzero = at::count_nonzero(self).item<int64_t>();
+  at::native::resize_output(out_, {total_nonzero, nDim});
+  if (out_.numel() == 0) {
+    return out_;
+  }
+
+  bool contiguous_output = !needsGather(out_);
+  Tensor out = out_;
+  if (!contiguous_output) {
+    out = at::empty_like(out_, MemoryFormat::Contiguous);
+  }
+
+  @autoreleasepool {
+    string key = "nonzero_out_native_mps" + getTensorsStringKey(self);
+    auto cachedGraph = LookUpOrCreateCachedGraph<CachedGraph>(key, [&](auto mpsGraph, auto newCachedGraph) {
+      MPSGraphTensor* inputTensor = mpsGraphRankedPlaceHolder(mpsGraph, self);
+
+      MPSGraphTensor* outputTensor = [mpsGraph nonZeroIndicesOfTensor:inputTensor name:nil];
+
+      newCachedGraph->inputTensor_ = inputTensor;
+      newCachedGraph->outputTensor_ = outputTensor;
+    });
+
+    Placeholder selfPlaceholder = Placeholder(cachedGraph->inputTensor_, self);
+    Placeholder outputPlaceholder = Placeholder(cachedGraph->outputTensor_, out);
+    auto feeds = dictionaryFromPlaceholders(selfPlaceholder);
+    runMPSGraph(stream, cachedGraph->graph(), feeds, outputPlaceholder);
+  }
+
+  if (!contiguous_output) {
+    out_.copy_(out);
+  }
+
+  return out_;
+}
+
 Tensor& nonzero_out_mps(const Tensor& self, Tensor& out_) {
   if (!is_macos_13_or_newer(MacOSVersion::MACOS_VER_14_0_PLUS)) {
     TORCH_WARN_ONCE("MPS: nonzero op is supported natively starting from macOS 14.0. ",
@@ -254,12 +342,19 @@ Tensor& nonzero_out_mps(const Tensor& self, Tensor& out_) {
   TORCH_CHECK(self.dim() <= maxDimensions, "nonzero is not supported for tensor with more than ", 16, " dimensions");
   TORCH_CHECK(out_.is_mps());
 
+  if (!is_macos_13_or_newer(MacOSVersion::MACOS_VER_15_0_PLUS) &&
+      (self.numel() >= nonZeroMaxSize || self.is_complex())) {
+    TORCH_WARN_ONCE("MPS: nonzero op is not natively supported for the provided input on MacOS14",
+                    "Falling back on CPU. This may have performance implications.",
+                    "See github.com/pytorch/pytorch/issues/122916 for further info");
+    Tensor out_fallback = nonzero_fallback(self);
+    at::native::resize_output(out_, out_fallback.sizes());
+    out_.copy_(out_fallback);
+    return out_;
+  }
+
   MPSStream* stream = getCurrentMPSStream();
-  struct CachedGraph : public MPSCachedGraph {
-    CachedGraph(MPSGraph* graph) : MPSCachedGraph(graph) {}
-    MPSGraphTensor* inputTensor_ = nil;
-    MPSGraphTensor* outputTensor_ = nil;
-  };
+  using CachedGraph = MPSUnaryCachedGraph;
 
   dispatch_sync(stream->queue(), ^() {
     stream->synchronize(SyncType::COMMIT_AND_WAIT);
@@ -273,13 +368,13 @@ Tensor& nonzero_out_mps(const Tensor& self, Tensor& out_) {
   bool contiguous_output = !needsGather(out_);
   Tensor out = out_;
   if (!contiguous_output) {
-    out = at::empty(out_.sizes(), out_.scalar_type(), std::nullopt, kMPS, std::nullopt, std::nullopt);
+    out = at::empty_like(out_, MemoryFormat::Contiguous);
   }
 
   @autoreleasepool {
-    string key = "nonzero_out_mps" + getTensorsStringKey(self);
+    string key = "nonzero_out_native_mps" + getTensorsStringKey(self);
     auto cachedGraph = LookUpOrCreateCachedGraph<CachedGraph>(key, [&](auto mpsGraph, auto newCachedGraph) {
-      MPSGraphTensor* inputTensor = mpsGraphRankedPlaceHolder(mpsGraph, getMPSDataType(self), getMPSShape(self));
+      MPSGraphTensor* inputTensor = mpsGraphRankedPlaceHolder(mpsGraph, self);
 
       MPSGraphTensor* outputTensor = [mpsGraph nonZeroIndicesOfTensor:inputTensor name:nil];
 
@@ -571,17 +666,20 @@ Tensor& index_select_out_mps(const Tensor& self, int64_t dim, const Tensor& inde
       newCachedGraph->outputTensor_ = outputTensor;
     });
 
+    // MPS TODO: MPS Gather is failing with MPS strided API. Fallback to old gather.
     Placeholder selfPlaceholder = Placeholder(cachedGraph->inputTensor_,
                                               self,
                                               /*mpsShape=*/nullptr,
                                               /*gatherTensorData=*/true,
-                                              /*dataType=*/inputType);
-    Placeholder indexPlaceholder = Placeholder(cachedGraph->indexTensor_, index);
+                                              /*dataType=*/inputType,
+                                              /*useStridedAPI=*/false);
+    Placeholder indexPlaceholder = Placeholder(cachedGraph->indexTensor_, index, nil, true, MPSDataTypeInvalid, false);
     Placeholder outputPlaceholder = Placeholder(cachedGraph->outputTensor_,
                                                 output,
                                                 /*mpsShape=*/nullptr,
                                                 /*gatherTensorData=*/false,
-                                                /*dataType=*/outputType);
+                                                /*dataType=*/outputType,
+                                                /*useStridedAPI=*/false);
 
     auto feeds = dictionaryFromPlaceholders(selfPlaceholder, indexPlaceholder);
     runMPSGraph(stream, cachedGraph->graph(), feeds, outputPlaceholder);
@@ -899,6 +997,6 @@ Tensor& index_fill_mps_(Tensor& self, int64_t dim, const Tensor& index, const Sc
   return self.index_fill_(dim, index, mps::wrapped_scalar_tensor_mps(source, self.device()));
 }
 
-REGISTER_DISPATCH(index_stub, &mps::index_kernel_mps);
-REGISTER_DISPATCH(index_put_stub, &mps::index_put_kernel_mps);
+REGISTER_DISPATCH(index_stub, &mps::index_kernel_mps)
+REGISTER_DISPATCH(index_put_stub, &mps::index_put_kernel_mps)
 } // namespace at::native

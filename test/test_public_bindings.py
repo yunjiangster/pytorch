@@ -3,13 +3,14 @@
 import importlib
 import inspect
 import json
+import logging
 import os
 import pkgutil
 import unittest
 from typing import Callable
 
 import torch
-from torch._utils_internal import get_file_path_2
+from torch._utils_internal import get_file_path_2  # @manual
 from torch.testing._internal.common_utils import (
     IS_JETSON,
     IS_MACOS,
@@ -18,6 +19,9 @@ from torch.testing._internal.common_utils import (
     skipIfTorchDynamo,
     TestCase,
 )
+
+
+log = logging.getLogger(__name__)
 
 
 class TestPublicBindings(TestCase):
@@ -267,25 +271,44 @@ class TestPublicBindings(TestCase):
         failures = []
 
         def onerror(modname):
-            failures.append((modname, ImportError))
+            failures.append(
+                (modname, ImportError("exception occurred importing package"))
+            )
 
         for mod in pkgutil.walk_packages(torch.__path__, "torch.", onerror=onerror):
             modname = mod.name
             try:
-                # TODO: fix "torch/utils/model_dump/__main__.py"
-                # which calls sys.exit() when we try to import it
                 if "__main__" in modname:
                     continue
                 importlib.import_module(modname)
             except Exception as e:
                 # Some current failures are not ImportError
-
-                failures.append((modname, type(e)))
+                log.exception("import_module failed")
+                failures.append((modname, e))
 
         # It is ok to add new entries here but please be careful that these modules
         # do not get imported by public code.
         private_allowlist = {
             "torch._inductor.codegen.cuda.cuda_kernel",
+            # TODO(#133647): Remove the onnx._internal entries after
+            # onnx and onnxscript are installed in CI.
+            "torch.onnx._internal.exporter",
+            "torch.onnx._internal.exporter._analysis",
+            "torch.onnx._internal.exporter._building",
+            "torch.onnx._internal.exporter._capture_strategies",
+            "torch.onnx._internal.exporter._compat",
+            "torch.onnx._internal.exporter._core",
+            "torch.onnx._internal.exporter._decomp",
+            "torch.onnx._internal.exporter._dispatching",
+            "torch.onnx._internal.exporter._fx_passes",
+            "torch.onnx._internal.exporter._ir_passes",
+            "torch.onnx._internal.exporter._isolated",
+            "torch.onnx._internal.exporter._onnx_program",
+            "torch.onnx._internal.exporter._registration",
+            "torch.onnx._internal.exporter._reporting",
+            "torch.onnx._internal.exporter._schemas",
+            "torch.onnx._internal.exporter._tensors",
+            "torch.onnx._internal.exporter._verification",
             "torch.onnx._internal.fx._pass",
             "torch.onnx._internal.fx.analysis",
             "torch.onnx._internal.fx.analysis.unsupported_nodes",
@@ -422,14 +445,16 @@ class TestPublicBindings(TestCase):
         }
 
         errors = []
-        for mod, excep_type in failures:
+        for mod, exc in failures:
             if mod in public_allowlist:
                 # TODO: Ensure this is the right error type
 
                 continue
             if mod in private_allowlist:
                 continue
-            errors.append(f"{mod} failed to import with error {excep_type}")
+            errors.append(
+                f"{mod} failed to import with error {type(exc).__qualname__}: {str(exc)}"
+            )
         self.assertEqual("", "\n".join(errors))
 
     # AttributeError: module 'torch.distributed' has no attribute '_shard'
