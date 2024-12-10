@@ -244,11 +244,6 @@ def dims(*names: str, min: Optional[int] = None, max: Optional[int] = None) -> T
     """
     Util to create multiple :func:`Dim` types.
 
-    Args:
-        *names (Tuple[str]): the names of the :func:`Dim` types to create.
-        min (Optional[int]): range lower bound.
-        max (Optional[int]): range upper bound.
-
     Returns:
         A tuple of :func:`Dim` types.
     """
@@ -606,9 +601,9 @@ class ShapesCollection:
     Builder for dynamic_shapes.
     Used to assign dynamic shape specifications to tensors that appear in inputs.
 
-    This is useful particularly when `args` is a nested input structure, and it's 
-    easier to index the input tensors, than to replicate the structure of `args` in 
-    the `dynamic_shapes` specification.
+    This is useful particularly when :func:`args` is a nested input structure, and it's 
+    easier to index the input tensors, than to replicate the structure of :func:`args` in 
+    the :func:`dynamic_shapes` specification.
 
     Example::
 
@@ -653,7 +648,7 @@ class ShapesCollection:
 
     def dynamic_shapes(self, m, args, kwargs=None):
         """
-        Generates the `dynamic_shapes` pytree structure according to `args` and `kwargs`.
+        Generates the :func:`dynamic_shapes` pytree structure according to :func:`args` and :func:`kwargs`.
         """
 
         t_ids = set()
@@ -1008,20 +1003,20 @@ def refine_dynamic_shapes_from_suggested_fixes(
     dynamic_shapes: Union[Dict[str, Any], Tuple[Any], List[Any]],
 ) -> Union[Dict[str, Any], Tuple[Any], List[Any]]:
     """
-    When exporting with `dynamic_shapes`, export may fail with a ConstraintViolation error if the specification 
+    When exporting with :func:`dynamic_shapes`, export may fail with a ConstraintViolation error if the specification 
     doesn't match the constraints inferred from tracing the model. The error message may provide suggested fixes - 
-    changes that can be made to `dynamic_shapes` to export successfully.
+    changes that can be made to :func:`dynamic_shapes` to export successfully.
 
-    Example error message::
+    Example ConstraintViolation error message::
     
         Suggested fixes:
 
-            dim = Dim('dim', min=3, max=6) -> this just refines the dim's range
-            dim = 4 -> this specializes to a constant
-            dy = dx + 1 -> dy was specified as an independent dim, but is actually tied to dx with this relation
+            dim = Dim('dim', min=3, max=6)  # this just refines the dim's range
+            dim = 4  # this specializes to a constant
+            dy = dx + 1  # dy was specified as an independent dim, but is actually tied to dx with this relation
 
-    This is a helper function that takes the ConstraintViolation error message and the original `dynamic_shapes` spec, 
-    and returns a new `dynamic_shapes` spec that incorporates the suggested fixes.
+    This is a helper function that takes the ConstraintViolation error message and the original :func:`dynamic_shapes` spec, 
+    and returns a new :func:`dynamic_shapes` spec that incorporates the suggested fixes.
 
     Example usage::
 
