@@ -240,9 +240,17 @@ Dim.STATIC = _DimHint.STATIC  # type: ignore[attr-defined]
 Dim.DYNAMIC = _DimHint.DYNAMIC  # type: ignore[attr-defined]
 
 
-def dims(*names: str, min: Optional[int] = None, max: Optional[int] = None):
+def dims(*names: str, min: Optional[int] = None, max: Optional[int] = None) -> Tuple[_Dim, ...]:
     """
     Util to create multiple :func:`Dim` types.
+
+    Args:
+        *names (Tuple[str]): the names of the :func:`Dim` types to create.
+        min (Optional[int]): range lower bound.
+        max (Optional[int]): range upper bound.
+
+    Returns:
+        A tuple of :func:`Dim` types.
     """
     return tuple(Dim(name, min=min, max=max) for name in names)
 
@@ -598,7 +606,12 @@ class ShapesCollection:
     Builder for dynamic_shapes.
     Used to assign dynamic shape specifications to tensors that appear in inputs.
 
+    This is useful particularly when `args` is a nested input structure, and it's 
+    easier to index the input tensors, than to replicate the structure of `args` in 
+    the `dynamic_shapes` specification.
+
     Example::
+
         args = ({"x": tensor_x, "others": [tensor_y, tensor_z]})
 
         dim = torch.export.Dim(...)
@@ -640,7 +653,7 @@ class ShapesCollection:
 
     def dynamic_shapes(self, m, args, kwargs=None):
         """
-        Generate dynamic_shapes.
+        Generates the `dynamic_shapes` pytree structure according to `args` and `kwargs`.
         """
 
         t_ids = set()
@@ -995,42 +1008,31 @@ def refine_dynamic_shapes_from_suggested_fixes(
     dynamic_shapes: Union[Dict[str, Any], Tuple[Any], List[Any]],
 ) -> Union[Dict[str, Any], Tuple[Any], List[Any]]:
     """
-    For working with export's dynamic shapes suggested fixes, and/or automatic dynamic shapes.
-    Refines the given dynamic shapes spec, given a ConstraintViolation error message and the original dynamic shapes.
+    When exporting with `dynamic_shapes`, export may fail with a ConstraintViolation error if the specification 
+    doesn't match the constraints inferred from tracing the model. The error message may provide suggested fixes - 
+    changes that can be made to `dynamic_shapes` to export successfully.
 
-    For most cases behavior is straightforward - i.e. for suggested fixes that specialize or refine a Dim's range,
-    or fixes that suggest a derived relation, the new dynamic shapes spec will be updated as such.
+    Example error message::
+    
+        Suggested fixes:
 
-    e.g.
-    Suggested fixes:
+            dim = Dim('dim', min=3, max=6) -> this just refines the dim's range
+            dim = 4 -> this specializes to a constant
+            dy = dx + 1 -> dy was specified as an independent dim, but is actually tied to dx with this relation
 
-        dim = Dim('dim', min=3, max=6) -> this just refines the dim's range
-        dim = 4 -> this specializes to a constant
-        dy = dx + 1 -> dy was specified as an independent dim, but is actually tied to dx with this relation
+    This is a helper function that takes the ConstraintViolation error message and the original `dynamic_shapes` spec, 
+    and returns a new `dynamic_shapes` spec that incorporates the suggested fixes.
 
-    However, suggested fixes associated with derived dims can be more complicated.
-    For example, if a suggested fix is provided for a root dim, the new derived dim value is evaluated based on the root.
+    Example usage::
 
-    e.g.
-    dx = Dim('dx')
-    dy = dx + 2
-    dynamic_shapes = {"x": (dx,), "y": (dy,)}
+        try:
+            ep = export(mod, args, dynamic_shapes=dynamic_shapes)
+        except torch._dynamo.exc.UserError as exc:
+            new_shapes = refine_dynamic_shapes_from_suggested_fixes(
+                exc.msg, dynamic_shapes
+            )
+            ep = export(mod, args, dynamic_shapes=new_shapes)
 
-    Suggested fixes:
-
-        dx = 4  # specialization will lead to dy also specializing = 6
-        dx = Dim('dx', max=6)  # dy now has max = 8
-
-    Derived dims suggested fixes can also be used to express divisibility constraints.
-    This involves creating new root dims that aren't tied to a particular input shape.
-    In this case the root dims won't appear directly in the new spec, but as a root of
-    one of the dims.
-
-    e.g.
-    Suggested fixes:
-
-        _dx = Dim('_dx', max=1024)  # this won't appear in the return result, but dx will
-        dx = 4*_dx  # dx is now divisible by 4, with a max value of 4096
     """
 
     import re
