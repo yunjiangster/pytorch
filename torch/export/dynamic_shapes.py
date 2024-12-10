@@ -601,8 +601,8 @@ class ShapesCollection:
     Builder for dynamic_shapes.
     Used to assign dynamic shape specifications to tensors that appear in inputs.
 
-    This is useful particularly when :func:`args` is a nested input structure, and it's 
-    easier to index the input tensors, than to replicate the structure of :func:`args` in 
+    This is useful particularly when :func:`args` is a nested input structure, and it's
+    easier to index the input tensors, than to replicate the structure of :func:`args` in
     the :func:`dynamic_shapes` specification.
 
     Example::
@@ -1003,19 +1003,19 @@ def refine_dynamic_shapes_from_suggested_fixes(
     dynamic_shapes: Union[Dict[str, Any], Tuple[Any], List[Any]],
 ) -> Union[Dict[str, Any], Tuple[Any], List[Any]]:
     """
-    When exporting with :func:`dynamic_shapes`, export may fail with a ConstraintViolation error if the specification 
-    doesn't match the constraints inferred from tracing the model. The error message may provide suggested fixes - 
+    When exporting with :func:`dynamic_shapes`, export may fail with a ConstraintViolation error if the specification
+    doesn't match the constraints inferred from tracing the model. The error message may provide suggested fixes -
     changes that can be made to :func:`dynamic_shapes` to export successfully.
 
     Example ConstraintViolation error message::
-    
+
         Suggested fixes:
 
             dim = Dim('dim', min=3, max=6)  # this just refines the dim's range
             dim = 4  # this specializes to a constant
             dy = dx + 1  # dy was specified as an independent dim, but is actually tied to dx with this relation
 
-    This is a helper function that takes the ConstraintViolation error message and the original :func:`dynamic_shapes` spec, 
+    This is a helper function that takes the ConstraintViolation error message and the original :func:`dynamic_shapes` spec,
     and returns a new :func:`dynamic_shapes` spec that incorporates the suggested fixes.
 
     Example usage::
