@@ -240,7 +240,9 @@ Dim.STATIC = _DimHint.STATIC  # type: ignore[attr-defined]
 Dim.DYNAMIC = _DimHint.DYNAMIC  # type: ignore[attr-defined]
 
 
-def dims(*names: str, min: Optional[int] = None, max: Optional[int] = None) -> Tuple[_Dim, ...]:
+def dims(
+    *names: str, min: Optional[int] = None, max: Optional[int] = None
+) -> Tuple[_Dim, ...]:
     """
     Util to create multiple :func:`Dim` types.
 
