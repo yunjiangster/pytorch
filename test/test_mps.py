@@ -8595,7 +8595,7 @@ class TestLogical(TestCaseMPS):
 
         C = torch.randn(size=[1, 4], device='mps', dtype=torch.float32)
         D = torch.randn(size=[1, 4], device='cpu', dtype=torch.float32)
-        with self.assertRaisesRegex(RuntimeError, 'Expected elements.is_mps()*'):
+        with self.assertRaisesRegex(RuntimeError, 'Expected all tensors to be on the same device'):
             out = torch.isin(C, D)
 
 class TestSmoothL1Loss(TestCaseMPS):
