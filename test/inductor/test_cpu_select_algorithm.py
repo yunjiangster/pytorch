@@ -2140,10 +2140,7 @@ class TestSelectAlgorithmDynamicShapes(_DynamicShapesTestBase):
         self.assertEqual(counters["inductor"]["select_algorithm_autotune"], 1)
         self.assertEqual(counters["inductor"]["cpp_epilogue_fusion_counter"], 1)
 
-    # We need it for the per-tensor case because Dynamo will end up specializing batch dimension,
-    # which we marked as dynamic with mark_dynamic
-    # This might be due to a bug in Dynamo
-    @dynamo_config.patch({"allow_ignore_mark_dynamic": True})
+
     @inductor_config.patch({"freezing": True})
     @patches
     @torch.no_grad
@@ -2169,7 +2166,7 @@ class TestSelectAlgorithmDynamicShapes(_DynamicShapesTestBase):
         if dtype == torch.bfloat16 and not torch.ops.mkldnn._is_mkldnn_bf16_supported():
             return
         M = 32
-        in_feature = 32
+        in_feature = 48
         out_feature = 64
         q_min, q_max = -32, 31
 
